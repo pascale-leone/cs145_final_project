@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from starter_vae import VariationalAutoencoder
 from sklearn.metrics import roc_auc_score, roc_curve, f1_score, classification_report
 from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
 
 # ── 1. LOAD FEATURES ─────────────────────────────────────────────────────────
 
@@ -19,7 +20,6 @@ video_labels = np.array([1 if k.startswith("abnormal") else 0 for k in video_key
 normal_keys   = [k for k, l in zip(video_keys, video_labels) if l == 0]
 abnormal_keys = [k for k, l in zip(video_keys, video_labels) if l == 1]
 
-# Train on normal videos only — no abnormal videos ever seen during training
 train_keys, normal_test_keys = train_test_split(
     normal_keys, test_size=0.2, random_state=42
 )
@@ -29,71 +29,62 @@ print(f"Train videos (normal only): {len(train_keys)}")
 print(f"Test videos (normal):       {len(normal_test_keys)}")
 print(f"Test videos (abnormal):     {len(abnormal_keys)}")
 
-# ── 3. BUILD ARRAYS — KEEP (25, 1024) PER VIDEO ───────────────────────────────
+# ── 3. BUILD ARRAYS ──────────────────────────────────────────────────────────
 
-# Stack into (N_videos, 25, 1024) — preserves temporal structure
 X_train_vids = np.stack([features[k] for k in train_keys])   # (N_train, 25, 1024)
 X_test_vids  = np.stack([features[k] for k in test_keys])    # (N_test,  25, 1024)
 y_test_vids  = np.array([0 if k in normal_test_keys else 1 for k in test_keys])
 
-# ── 4. NORMALIZE USING TRAIN STATS ONLY ──────────────────────────────────────
+# ── 4. Z-SCORE NORMALIZE USING TRAIN STATS ───────────────────────────────────
 
-X_min = X_train_vids.min()
-X_max = X_train_vids.max()
+X_train_flat_raw = X_train_vids.reshape(-1, 1024)
+feat_mean = X_train_flat_raw.mean(axis=0)
+feat_std  = X_train_flat_raw.std(axis=0) + 1e-8  # avoid division by zero
 
-X_train_norm = (X_train_vids - X_min) / (X_max - X_min)  # (N_train, 25, 1024)
-X_test_norm  = (X_test_vids  - X_min) / (X_max - X_min)  # (N_test,  25, 1024)
+X_train_norm = (X_train_vids - feat_mean) / feat_std
+X_test_norm  = (X_test_vids  - feat_mean) / feat_std
 
-# ── 5. FLATTEN SEGMENTS FOR TRAINING (no leakage — already split by video) ───
+# ── 5. FLATTEN SEGMENTS FOR TRAINING ─────────────────────────────────────────
 
-X_train_flat = X_train_norm.reshape(-1, 1024)  # (N_train*25, 1024)
+X_train_flat = X_train_norm.reshape(-1, 1024)
 
 train_dataset = TensorDataset(
     torch.FloatTensor(X_train_flat),
     torch.zeros(len(X_train_flat))
 )
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
 # ── 6. TRAIN VAE ──────────────────────────────────────────────────────────────
 
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 model = VariationalAutoencoder(
-    q_sigma=0.001, # try .0001, .001, .01
-    n_dims_code=16,
+    n_dims_code=32,
     n_dims_data=1024,
     hidden_layer_sizes=[512, 256]
 ).to(device)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-class Args:
-    n_mc_samples = 1
+n_epochs = 100
+for epoch in range(1, n_epochs + 1):
+    model.train_for_one_epoch(optimizer, train_loader, device, epoch)
 
-args = Args()
+model.save_to_file("vae_baseline.pt")
+print("Model saved to vae_baseline.pt")
 
-for epoch in range(1, 101):
-    model.train_for_one_epoch_of_gradient_update_steps(
-        optimizer, train_loader, device, epoch, args
-    )
-
-# ── 7. EVALUATE PER VIDEO — PRESERVING TEMPORAL STRUCTURE ────────────────────
+# ── 7. EVALUATE ──────────────────────────────────────────────────────────────
 
 model.eval()
 video_recon_errors = []
 
 for vid_feats in X_test_norm:
-    # vid_feats shape: (25, 1024) — all segments for one video
     x = torch.FloatTensor(vid_feats).to(device)  # (25, 1024)
-
     with torch.no_grad():
-        x_recon, mu = model(x)
-
-    # Reconstruction error per segment: (25,)
-    seg_errors = torch.mean((x - x_recon) ** 2, dim=1).numpy()
-
-    # Aggregate across segments — try mean, max, or top-k
-    video_recon_errors.append(seg_errors.max())   # or .max()
+        x_recon, mu, log_var = model(x)
+    seg_errors = torch.mean((x - x_recon) ** 2, dim=1).cpu().numpy()
+    video_recon_errors.append(seg_errors.max())
 
 video_recon_errors = np.array(video_recon_errors)
 
@@ -124,14 +115,10 @@ print(classification_report(
     target_names=['normal', 'abnormal']
 ))
 
-import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, roc_auc_score
-
-fpr, tpr, thresholds = roc_curve(y_test_vids, video_recon_errors)
-auc = roc_auc_score(y_test_vids, video_recon_errors)
+# ── 9. ROC CURVE PLOT ────────────────────────────────────────────────────────
 
 plt.figure(figsize=(7, 5))
-plt.plot(fpr, tpr, label=f"VAE + TSN BN-Inception (AUC = {auc:.4f})")
+plt.plot(fpr, tpr, label=f"VAE baseline (AUC = {auc:.4f})")
 plt.plot([0, 1], [0, 1], 'k--', label="Random")
 plt.xlabel("False Positive Rate")
 plt.ylabel("True Positive Rate")

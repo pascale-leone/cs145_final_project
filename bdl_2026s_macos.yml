@@ -1,0 +1,27 @@
+name: bdl_2026s_env
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python==3.11
+  - pip
+  - git
+  ## Scientific Computing
+  - numpy=2.0
+  - scipy=1.16
+  ## Visualization
+  - notebook=7.4
+  - matplotlib=3.10
+  - seaborn=0.13
+  ## Data I/O
+  - pandas=2.3
+  ## Machine Learning
+  - scikit-learn=1.7
+  ### Automatic differentiation
+  - jax=0.7
+  - jaxlib
+  #- pytorch::pytorch=2.4
+  #- pytorch::cpuonly
+  #- pytorch::torchvision
+  - pip:
+    - nbdev
