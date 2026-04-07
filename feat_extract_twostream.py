@@ -180,7 +180,6 @@ for k, v in list(features.items())[:5]:
     print(k, v.shape)  # expected: (25, 1024)
 
 
-
 # ── SHAPE OF FEATURES ─────────────────────────────────────────────────────────
 sample_key = list(features.keys())[0]
 sample_feat = features[sample_key]

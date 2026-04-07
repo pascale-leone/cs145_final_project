@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 # ── 1. LOAD FEATURES ─────────────────────────────────────────────────────────
 
-with open("tad_rgb_features.pkl", "rb") as f:
+with open("tad_rgb_features_32.pkl", "rb") as f:
     features = pickle.load(f)
 
 video_keys = list(features.keys())
@@ -122,8 +122,8 @@ plt.plot(fpr, tpr, label=f"VAE baseline (AUC = {auc:.4f})")
 plt.plot([0, 1], [0, 1], 'k--', label="Random")
 plt.xlabel("False Positive Rate")
 plt.ylabel("True Positive Rate")
-plt.title("ROC Curve — VAE Anomaly Detection on TAD")
+plt.title("ROC Curve — VAE Anomaly Detection on TAD (32 Frames)")
 plt.legend()
 plt.tight_layout()
-plt.savefig("roc_curve.png")
+plt.savefig("roc_curve_32frames.png")
 plt.show()

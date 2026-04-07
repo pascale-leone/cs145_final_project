@@ -21,7 +21,8 @@ from transforms import (Stack, ToTorchFormatTensor, GroupNormalize,
                         GroupScale, GroupCenterCrop)
 
 # ── BUILD RGB TSN MODEL ONLY ──────────────────────────────────────────────────
-NUM_SEGMENTS = 25
+#NUM_SEGMENTS = 25
+NUM_SEGMENTS = 32
 
 rgb_tsn = TSN(num_class=101, num_segments=NUM_SEGMENTS, modality='RGB',
               base_model='BNInception', consensus_type='avg', dropout=0.0)
@@ -66,7 +67,7 @@ def extract_video_features(frame_dir, num_segments=NUM_SEGMENTS):
     return features_out['rgb'].numpy()  # (25, 1024)
 
 # ── PATHS ─────────────────────────────────────────────────────────────────────
-output_path    = "/Users/pascaleleone/Desktop/Tufts CS/CS145/project/cs145_final_project/tad_rgb_features_v2.pkl"
+output_path    = "/Users/pascaleleone/Desktop/Tufts CS/CS145/project/cs145_final_project/tad_rgb_features_32.pkl"
 rawframes_root = "/Users/pascaleleone/.cache/kagglehub/datasets/nikanvasei/traffic-anomaly-dataset-tad/versions/1/TAD/frames"
 
 label_map = {"abnormal": 1, "normal": 0}
@@ -103,3 +104,29 @@ print(f"Total videos: {len(features)}")
 sample_key  = list(features.keys())[0]
 sample_feat = features[sample_key]
 print(f"Sample: {sample_key} → shape={sample_feat.shape}, mean={sample_feat.mean():.3f}")
+
+# ── SHAPE OF FEATURES ─────────────────────────────────────────────────────────
+sample_key = list(features.keys())[0]
+sample_feat = features[sample_key]
+print(f"\nSample key: {sample_key}")
+print(f"Feature shape: {sample_feat.shape}")   # expected (25, 1024)
+print(f"Feature dtype: {sample_feat.dtype}")
+
+# ── CLASS BREAKDOWN ───────────────────────────────────────────────────────────
+abnormal = {k: v for k, v in features.items() if k.startswith("abnormal")}
+normal   = {k: v for k, v in features.items() if k.startswith("normal")}
+print(f"\nAbnormal videos: {len(abnormal)}")
+print(f"Normal videos:   {len(normal)}")
+
+# ── VALUE STATS ───────────────────────────────────────────────────────────────
+all_feats = np.stack(list(features.values()))  # (N, 25, 1024)
+print(f"\nFull feature array shape: {all_feats.shape}")
+print(f"Mean:  {all_feats.mean():.4f}")
+print(f"Std:   {all_feats.std():.4f}")
+print(f"Min:   {all_feats.min():.4f}")
+print(f"Max:   {all_feats.max():.4f}")
+
+# ── PER-VIDEO SUMMARY (first 5) ───────────────────────────────────────────────
+print("\nFirst 5 videos:")
+for k, v in list(features.items())[:5]:
+    print(f"  {k}: shape={v.shape}, mean={v.mean():.3f}, std={v.std():.3f}")
