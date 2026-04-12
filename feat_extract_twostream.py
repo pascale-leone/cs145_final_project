@@ -25,7 +25,7 @@ from transforms import (Stack, ToTorchFormatTensor, GroupNormalize,
                         GroupScale, GroupCenterCrop)
 
 # ── BUILD TSN MODELS ──────────────────────────────────────────────────────────
-NUM_SEGMENTS = 25
+NUM_SEGMENTS = 32
 FLOW_LENGTH  = 5   # TSN default: stack 5 consecutive x/y pairs → 10 channels
 
 rgb_tsn = TSN(num_class=101, num_segments=NUM_SEGMENTS, modality='RGB',
@@ -134,7 +134,7 @@ def extract_video_features(frame_dir, flow_dir, num_segments=NUM_SEGMENTS):
     return np.concatenate([rgb_feat, flow_feat], axis=1)  # (25, 2048)
 
 # ── PATHS ─────────────────────────────────────────────────────────────────────
-output_path    = "/Users/pascaleleone/Desktop/Tufts CS/CS145/project/cs145_final_project/tad_twostream_features_v3.pkl"
+output_path    = "/Users/pascaleleone/Desktop/Tufts CS/CS145/project/cs145_final_project/tad_twostream_features_32.pkl"
 rawframes_root = "/Users/pascaleleone/.cache/kagglehub/datasets/nikanvasei/traffic-anomaly-dataset-tad/versions/1/TAD/frames"
 flow_root      = "/Users/pascaleleone/.cache/kagglehub/datasets/nikanvasei/traffic-anomaly-dataset-tad/versions/1/TAD/flow"
 

@@ -77,14 +77,14 @@ class VariationalAutoencoder(nn.Module):
         z = self.reparameterize(mu, log_var)
         return self.decode(z), mu, log_var
 
-    def calc_vi_loss(self, x_ND, n_mc_samples=1):
+    def calc_vi_loss(self, x_ND, n_mc_samples=1, sigma2=1):
         """Compute the negative ELBO (reconstruction MSE + KL divergence).
 
         Reconstruction: MSE (Gaussian decoder with fixed unit variance)
         KL: Closed-form KL(q(z|x) || p(z)) for diagonal Gaussian q and N(0,I) prior
         """
         mu, log_var = self.encode(x_ND)
-        N = x_ND.shape[0]
+        N, D = x_ND.shape
 
         total_recon = 0.0
         for _ in range(n_mc_samples):
@@ -93,7 +93,8 @@ class VariationalAutoencoder(nn.Module):
             # MSE reconstruction loss, summed over features, averaged over batch
             total_recon += F.mse_loss(x_recon, x_ND, reduction='sum') / N
 
-        recon_loss = total_recon / n_mc_samples
+            #recon_loss = total_recon / n_mc_samples
+            recon_loss = (1/(2*sigma2) * total_recon / n_mc_samples) + D/2*np.log(2*np.pi*sigma2)
 
         # KL divergence: -0.5 * sum(1 + log_var - mu^2 - exp(log_var))
         # Averaged over batch
@@ -102,7 +103,7 @@ class VariationalAutoencoder(nn.Module):
         loss = recon_loss + kl_loss
         return loss, x_recon, recon_loss.item(), kl_loss.item()
 
-    def train_for_one_epoch(self, optimizer, train_loader, device, epoch):
+    def train_for_one_epoch(self, optimizer, train_loader, device, epoch, sigma2=1):
         """Perform one epoch of gradient updates."""
         self.train()
         n_batch = len(train_loader)
@@ -113,7 +114,7 @@ class VariationalAutoencoder(nn.Module):
         for batch_idx, (batch_data, _) in enumerate(train_loader):
             x = batch_data.to(device)
             optimizer.zero_grad()
-            loss, _, recon, kl = self.calc_vi_loss(x)
+            loss, _, recon, kl = self.calc_vi_loss(x, sigma2)
             loss.backward()
             optimizer.step()
 

@@ -78,6 +78,7 @@ print("Model saved to vae_baseline.pt")
 
 model.eval()
 video_recon_errors = []
+kl_scores = []
 
 for vid_feats in X_test_norm:
     x = torch.FloatTensor(vid_feats).to(device)  # (25, 1024)
@@ -86,6 +87,12 @@ for vid_feats in X_test_norm:
     seg_errors = torch.mean((x - x_recon) ** 2, dim=1).cpu().numpy()
     video_recon_errors.append(seg_errors.max())
 
+    kl    = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1)
+    kl_scores.append(kl.max().item())
+
+for name, scores in [("Recon", video_recon_errors), ("KL", kl_scores)]:
+    arr = np.array(scores)
+    print(f"{name} — normal: {arr[y_test_vids==0].mean():.4f}  abnormal: {arr[y_test_vids==1].mean():.4f}")
 video_recon_errors = np.array(video_recon_errors)
 
 # ── 8. RESULTS ────────────────────────────────────────────────────────────────
@@ -127,3 +134,16 @@ plt.legend()
 plt.tight_layout()
 plt.savefig("roc_curve_32frames.png")
 plt.show()
+
+# Beta test
+for beta_test in [1.0, 0.1, 0.05, 0.01, 0.005, 0.001, 0.0005, 0.0001]:
+    scores = []
+    for vid_feats in X_test_norm:
+        x = torch.FloatTensor(vid_feats).to(device)
+        with torch.no_grad():
+            x_recon, mu, log_var = model(x)
+        recon = torch.mean((x - x_recon)**2, dim=1).max().item()
+        kl = (-0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1)).max().item()
+        scores.append(recon + beta_test * kl)
+    auc = roc_auc_score(y_test_vids, scores)
+    print(f"beta={beta_test:.3f}  AUC={auc:.4f}")
