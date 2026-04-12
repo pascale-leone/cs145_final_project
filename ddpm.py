@@ -86,6 +86,89 @@ class LinearNoiseScheduler:
         self.alpha_bars = self.alpha_bars.to(device)
         return self
     
+class LDMAutoencoder(nn.Module):
+    """Autoencoder with tunable KL weight (beta) for latent diffusion.
+
+    When beta=0, this is a pure autoencoder (no regularization).
+    When beta=1, this is a standard VAE.
+    For LDM, we use beta that closes to 0, so the latent space preserves more signal
+    while still being slightly regularized for stability.
+    """
+
+    def __init__(self, n_dims_data=1024, n_dims_code=64,
+                 hidden_layer_sizes=[512, 256], beta=0.01):
+        super().__init__()
+        self.n_dims_data = n_dims_data
+        self.n_dims_code = n_dims_code
+        self.beta = beta
+        self.kwargs = dict(
+            n_dims_data=n_dims_data, n_dims_code=n_dims_code,
+            hidden_layer_sizes=hidden_layer_sizes, beta=beta)
+
+        # encoder
+        encoder_layers = []
+        prev_dim = n_dims_data
+        for h_dim in hidden_layer_sizes:
+            encoder_layers.append(nn.Linear(prev_dim, h_dim))
+            encoder_layers.append(nn.BatchNorm1d(h_dim))
+            encoder_layers.append(nn.ReLU())
+            prev_dim = h_dim
+        self.encoder_body = nn.Sequential(*encoder_layers)
+        self.fc_mu = nn.Linear(prev_dim, n_dims_code)
+        self.fc_logvar = nn.Linear(prev_dim, n_dims_code)
+
+        # Decoder
+        decoder_layers = []
+        decoder_hidden = list(reversed(hidden_layer_sizes))
+        prev_dim = n_dims_code
+        for h_dim in decoder_hidden:
+            decoder_layers.append(nn.Linear(prev_dim, h_dim))
+            decoder_layers.append(nn.BatchNorm1d(h_dim))
+            decoder_layers.append(nn.ReLU())
+            prev_dim = h_dim
+        decoder_layers.append(nn.Linear(prev_dim, n_dims_data))
+        self.decoder = nn.Sequential(*decoder_layers)
+
+    def encode(self, x):
+        h = self.encoder_body(x)
+        return self.fc_mu(h), self.fc_logvar(h)
+
+    def reparameterize(self, mu, log_var):
+        if self.training:
+            std = torch.exp(0.5 * log_var)
+            return mu + std * torch.randn_like(std)
+        return mu
+
+    def decode(self, z):
+        return self.decoder(z)
+
+    def forward(self, x):
+        mu, log_var = self.encode(x)
+        z = self.reparameterize(mu, log_var)
+        return self.decode(z), mu, log_var
+
+    def loss(self, x):
+        x_recon, mu, log_var = self.forward(x)
+        N = x.shape[0]
+        recon = F.mse_loss(x_recon, x, reduction='sum') / N
+        kl = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp()) / N
+        total = recon + self.beta * kl
+        return total, recon.item(), kl.item()
+
+    def save_to_file(self, fpath):
+        state_dict = self.state_dict()
+        state_dict['kwargs'] = self.kwargs
+        torch.save(state_dict, fpath)
+
+    @classmethod
+    def load_from_file(cls, fpath):
+        state_dict = torch.load(fpath, weights_only=False)
+        kwargs = state_dict.pop('kwargs')
+        model = cls(**kwargs)
+        model.load_state_dict(state_dict)
+        return model
+
+
 class SinusoidalTimestepEmbedding(nn.Module):
     """Sinusoidal embedding for timesteps."""
     
