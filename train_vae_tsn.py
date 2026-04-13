@@ -74,58 +74,66 @@ train_dataset = TensorDataset(
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
 # ── 6. TRAIN VAE ──────────────────────────────────────────────────────────────
-sigma2_values = np.logspace(-3,1,10)
-sigma2_values = [.001]
-
+sigma2_values = np.logspace(-1,1,5)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# Train
-torch.manual_seed(42)
-np.random.seed(42)
-model = VariationalAutoencoder(
-    n_dims_code=32,
-    n_dims_data=1024,
-    hidden_layer_sizes=[512, 256]
-).to(device)
 
-n_epochs=500
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-for epoch in range(1, n_epochs + 1):
-    model.train_for_one_epoch(optimizer, train_loader, device, epoch)
 
-# Precompute val scores
-model.eval()
-val_recon, val_kl = [], []
-for vid_feats in X_val_norm:
-    x = torch.FloatTensor(vid_feats).to(device)
-    with torch.no_grad():
-        x_recon, mu, log_var = model(x)
-    recon_errors = torch.mean((x - x_recon) ** 2, dim=1).cpu().numpy()
-    kl_per_seg = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1).cpu().numpy()
-    val_recon.append(recon_errors)
-    val_kl.append(kl_per_seg)
+n_epochs=100
+models, all_auc, all_beta = [], [], []
+for sigma2 in sigma2_values:
+    # Train
+    torch.manual_seed(42)
+    np.random.seed(42)
+    model = VariationalAutoencoder(
+        n_dims_code=32,
+        n_dims_data=1024,
+        hidden_layer_sizes=[512, 256]
+    ).to(device)
 
-# Search for beta
-beta_list = [0, 0.1, 0.5, 1.0, 2.0]
-auc_vals = []
-for beta in beta_list:
-    scores = [r.mean() + beta * k.mean() for r, k in zip(val_recon, val_kl)]
-    auc = roc_auc_score(y_val_vids, scores)
-    auc_vals.append(auc)
-    print(f'beta: {beta}, auc: {auc:.4f}')
 
-best_beta = beta_list[np.argmax(auc_vals)]
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    for epoch in range(1, n_epochs + 1):
+        model.train_for_one_epoch(optimizer, train_loader, device, epoch, sigma2=sigma2)
+    
+    models.append(model)
+    # Precompute val scores
+    model.eval()
+    val_recon, val_kl = [], []
+    for vid_feats in X_val_norm:
+        x = torch.FloatTensor(vid_feats).to(device)
+        with torch.no_grad():
+            x_recon, mu, log_var = model(x)
+        recon_errors = torch.mean((x - x_recon) ** 2, dim=1).cpu().numpy()
+        kl_per_seg = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1).cpu().numpy()
+        val_recon.append(recon_errors)
+        val_kl.append(kl_per_seg)
+
+    # Search for beta
+    beta_list = [0, 0.05, 0.1, 0.5, 1.0, 2.0]
+    auc_vals = []
+    for beta in beta_list:
+        scores = [r.mean() + beta * k.mean() for r, k in zip(val_recon, val_kl)]
+        auc = roc_auc_score(y_val_vids, scores)
+        auc_vals.append(auc)
+        print(f'sigma2: {sigma2}, beta: {beta}, auc: {auc:.4f}')
+
+    all_beta.append(beta_list[np.argmax(auc_vals)])
+    all_auc.append(np.max(auc_vals))
+
 # ── 7. EVALUATE ──────────────────────────────────────────────────────────────
 
-model.eval()
+best_model = models[np.argmax(all_auc)]
+best_beta = all_beta[np.argmax(all_auc)]
+best_model.eval()
 video_recon_errors = []
-kl_scores = []
+
 
 for vid_feats in X_test_norm:
     x = torch.FloatTensor(vid_feats).to(device)  # (25, 1024)
     with torch.no_grad():
-        x_recon, mu, log_var = model(x)
+        x_recon, mu, log_var = best_model(x)
     recon_errors = torch.mean((x - x_recon) ** 2, dim=1).cpu().numpy()
     kl_per_seg = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1).cpu().numpy()
     
