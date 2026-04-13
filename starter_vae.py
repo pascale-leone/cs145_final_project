@@ -94,7 +94,9 @@ class VariationalAutoencoder(nn.Module):
             total_recon += F.mse_loss(x_recon, x_ND, reduction='sum') / N
 
             #recon_loss = total_recon / n_mc_samples
-            recon_loss = (1/(2*sigma2) * total_recon / n_mc_samples) + D/2*np.log(2*np.pi*sigma2)
+        #recon_loss = (1/(2*sigma2) * total_recon / n_mc_samples) + D/2*np.log(2*np.pi*sigma2)
+        avg_recon = total_recon / n_mc_samples
+        recon_loss = (1 / (2 * sigma2)) * avg_recon + (D / 2) * np.log(2 * np.pi * sigma2)
 
         # KL divergence: -0.5 * sum(1 + log_var - mu^2 - exp(log_var))
         # Averaged over batch
@@ -114,7 +116,7 @@ class VariationalAutoencoder(nn.Module):
         for batch_idx, (batch_data, _) in enumerate(train_loader):
             x = batch_data.to(device)
             optimizer.zero_grad()
-            loss, _, recon, kl = self.calc_vi_loss(x, sigma2)
+            loss, _, recon, kl = self.calc_vi_loss(x, sigma2=sigma2)
             loss.backward()
             optimizer.step()
 

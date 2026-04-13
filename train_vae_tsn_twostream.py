@@ -15,25 +15,40 @@ with open("tad_twostream_features.pkl", "rb") as f:
 video_keys = list(features.keys())
 video_labels = np.array([1 if k.startswith("abnormal") else 0 for k in video_keys])
 
-# ── 2. SPLIT AT VIDEO LEVEL ───────────────────────────────────────────────────
+# ── 2. SPLIT AT VIDEO LEVEL (Train, Test, Val) ───────────────────────────────────────────────────
 
 normal_keys   = [k for k, l in zip(video_keys, video_labels) if l == 0]
 abnormal_keys = [k for k, l in zip(video_keys, video_labels) if l == 1]
 
-train_keys, normal_test_keys = train_test_split(
+# 80% of normal data for train
+train_keys, normal_test_val_keys = train_test_split(
     normal_keys, test_size=0.2, random_state=42
 )
-test_keys = normal_test_keys + abnormal_keys
+
+normal_val_keys, normal_test_keys = train_test_split(
+    normal_test_val_keys, test_size=0.5, random_state=42
+)
+
+abnormal_val_keys, abnormal_test_keys = train_test_split(
+    abnormal_keys, test_size=0.5, random_state=42
+)
+
+val_keys = normal_val_keys + abnormal_val_keys
+test_keys = normal_test_keys + abnormal_test_keys
 
 print(f"Train videos (normal only): {len(train_keys)}")
 print(f"Test videos (normal):       {len(normal_test_keys)}")
-print(f"Test videos (abnormal):     {len(abnormal_keys)}")
+print(f"Test videos (abnormal):     {len(abnormal_test_keys)}")
+print(f"Val videos (normal):       {len(normal_val_keys)}")
+print(f"Val videos (abnormal):     {len(abnormal_val_keys)}")
 
 # ── 3. BUILD ARRAYS ──────────────────────────────────────────────────────────
 
-X_train_vids = np.stack([features[k] for k in train_keys])   # (N_train, 25, 1024)
-X_test_vids  = np.stack([features[k] for k in test_keys])    # (N_test,  25, 1024)
+X_train_vids = np.stack([features[k] for k in train_keys])   # (N_train, 25, 2048)
+X_test_vids  = np.stack([features[k] for k in test_keys])    # (N_test,  25, 2048)
 y_test_vids  = np.array([0 if k in normal_test_keys else 1 for k in test_keys])
+X_val_vids = np.stack([features[k] for k in val_keys])
+y_val_vids  = np.array([0 if k in normal_val_keys else 1 for k in val_keys])
 
 # ── 4. Z-SCORE NORMALIZE USING TRAIN STATS ───────────────────────────────────
 
@@ -43,6 +58,7 @@ feat_std  = X_train_flat_raw.std(axis=0) + 1e-8  # avoid division by zero
 
 X_train_norm = (X_train_vids - feat_mean) / feat_std
 X_test_norm  = (X_test_vids  - feat_mean) / feat_std
+X_val_norm  = (X_val_vids  - feat_mean) / feat_std
 
 # ── 5. FLATTEN SEGMENTS FOR TRAINING ─────────────────────────────────────────
 
@@ -55,24 +71,47 @@ train_dataset = TensorDataset(
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
 # ── 6. TRAIN VAE ──────────────────────────────────────────────────────────────
+sigma2_values = np.logspace(-2,0,3)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+# Train
+torch.manual_seed(42)
+np.random.seed(42)
 model = VariationalAutoencoder(
     n_dims_code=32,
     n_dims_data=2048,
     hidden_layer_sizes=[512, 256]
 ).to(device)
 
+n_epochs=100
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-n_epochs = 100
 for epoch in range(1, n_epochs + 1):
     model.train_for_one_epoch(optimizer, train_loader, device, epoch)
 
-model.save_to_file("vae_twostream_baseline.pt")
-print("Model saved to vae_twostream_baseline.pt")
+# Precompute val scores
+model.eval()
+val_recon, val_kl = [], []
+for vid_feats in X_val_norm:
+    x = torch.FloatTensor(vid_feats).to(device)
+    with torch.no_grad():
+        x_recon, mu, log_var = model(x)
+    recon_errors = torch.mean((x - x_recon) ** 2, dim=1).cpu().numpy()
+    kl_per_seg = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1).cpu().numpy()
+    val_recon.append(recon_errors)
+    val_kl.append(kl_per_seg)
+
+# Search for beta
+beta_list = [0, 0.1, 0.5, 1.0, 2.0]
+auc_vals = []
+for beta in beta_list:
+    scores = [r.mean() + beta * k.mean() for r, k in zip(val_recon, val_kl)]
+    auc = roc_auc_score(y_val_vids, scores)
+    auc_vals.append(auc)
+    print(f'beta: {beta}, auc: {auc:.4f}')
+
+best_beta = beta_list[np.argmax(auc_vals)]
 
 # ── 7. EVALUATE ──────────────────────────────────────────────────────────────
 
@@ -80,11 +119,14 @@ model.eval()
 video_recon_errors = []
 
 for vid_feats in X_test_norm:
-    x = torch.FloatTensor(vid_feats).to(device)  # (25, 1024)
+    x = torch.FloatTensor(vid_feats).to(device)  # (25, 2048)
     with torch.no_grad():
         x_recon, mu, log_var = model(x)
-    seg_errors = torch.mean((x - x_recon) ** 2, dim=1).cpu().numpy()
-    video_recon_errors.append(seg_errors.max())
+    recon_errors = torch.mean((x - x_recon) ** 2, dim=1).cpu().numpy()
+    kl_per_seg = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1).cpu().numpy()
+    
+    combined = recon_errors + best_beta * kl_per_seg
+    video_recon_errors.append(combined.mean())  
 
 video_recon_errors = np.array(video_recon_errors)
 
