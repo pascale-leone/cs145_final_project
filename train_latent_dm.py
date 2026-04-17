@@ -11,32 +11,48 @@ from ddpm import LinearNoiseScheduler, NoisePredictionDenoiser, LDMAutoencoder
 
 
 # load the features extracted
-with open("tad_rgb_features_32.pkl", "rb") as f:
+with open("tad_twostream_features.pkl", "rb") as f:
     features = pickle.load(f)
 
 video_keys = list(features.keys())
 video_labels = np.array([1 if k.startswith("abnormal") else 0 for k in video_keys])
 
-# split into train and test sets
+# split into train / val / test sets (mirrors train_vae_tsn.py to avoid test-set leakage)
 normal_keys = [k for k, l in zip(video_keys, video_labels) if l == 0]
 abnormal_keys = [k for k, l in zip(video_keys, video_labels) if l == 1]
 
-train_keys, normal_test_keys = train_test_split(normal_keys, test_size=0.2, random_state=42)
-test_keys = normal_test_keys + abnormal_keys
+# 80% of normal -> train; remaining 20% split evenly into val/test
+train_keys, normal_test_val_keys = train_test_split(normal_keys, test_size=0.2, random_state=42)
+normal_val_keys, normal_test_keys = train_test_split(normal_test_val_keys, test_size=0.5, random_state=42)
 
-print (f"Total videos: {len(video_keys)}, Train: {len(train_keys)}, Test: {len(test_keys)}. Normal test: {len(normal_test_keys)}, Abnormal test: {len(abnormal_keys)}")
+# 50/50 split of abnormal into val/test
+abnormal_val_keys, abnormal_test_keys = train_test_split(abnormal_keys, test_size=0.5, random_state=42)
+
+val_keys = normal_val_keys + abnormal_val_keys
+test_keys = normal_test_keys + abnormal_test_keys
+
+print(f"Train videos (normal only): {len(train_keys)}")
+print(f"Val   videos (normal / abnormal): {len(normal_val_keys)} / {len(abnormal_val_keys)}")
+print(f"Test  videos (normal / abnormal): {len(normal_test_keys)} / {len(abnormal_test_keys)}")
 
 # prepare training data
 x_train_vids = np.stack([features[k] for k in train_keys])
-x_test_vids = np.stack([features[k] for k in test_keys])
-y_test_vids = np.array([0 if k in normal_test_keys else 1 for k in test_keys])
+x_val_vids   = np.stack([features[k] for k in val_keys])
+x_test_vids  = np.stack([features[k] for k in test_keys])
+y_val_vids   = np.array([0 if k in normal_val_keys  else 1 for k in val_keys])
+y_test_vids  = np.array([0 if k in normal_test_keys else 1 for k in test_keys])
 
-# normalize features
+# normalize features using TRAIN stats only
 x_train_flat_raw = x_train_vids.reshape(-1, x_train_vids.shape[-1])
-x_test_flat_raw = x_test_vids.reshape(-1, x_test_vids.shape[-1])
-x_train_flat = (x_train_flat_raw - np.mean(x_train_flat_raw, axis=0)) / (np.std(x_train_flat_raw, axis=0) + 1e-8)
-x_test_flat = (x_test_flat_raw - np.mean(x_train_flat_raw, axis=0)) / (np.std(x_train_flat_raw, axis=0) + 1e-8)
-x_test_by_video = x_test_flat.reshape(x_test_vids.shape[0], x_test_vids.shape[1], x_test_vids.shape[2])
+feat_mean = np.mean(x_train_flat_raw, axis=0)
+feat_std  = np.std(x_train_flat_raw, axis=0) + 1e-8
+
+x_train_flat = (x_train_flat_raw - feat_mean) / feat_std
+x_val_flat   = (x_val_vids.reshape(-1, x_val_vids.shape[-1])  - feat_mean) / feat_std
+x_test_flat  = (x_test_vids.reshape(-1, x_test_vids.shape[-1]) - feat_mean) / feat_std
+
+x_val_by_video  = x_val_flat.reshape(x_val_vids.shape)
+x_test_by_video = x_test_flat.reshape(x_test_vids.shape)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -48,7 +64,7 @@ print("Step 1: Training LDM Autoencoder (beta=0.01)")
 print("="*70)
 
 ldm_ae = LDMAutoencoder(
-    n_dims_data=1024, n_dims_code=64,
+    n_dims_data=2048, n_dims_code=64,
     hidden_layer_sizes=[512, 256], beta=0.01
 ).to(device)
 
@@ -175,21 +191,37 @@ def score_ldm_denoise_error(x_test_flat, encoder, scheduler, denoiser, device, n
             video_scores.append(seg_errors.max())  # take max error across segments as video score
     return np.array(video_scores)
                 
-# Score with reconstruction approach (multiple noise levels)
-print("\nScoring latent diffusion model...")
+# ---- Select best noise level on VALIDATION set ----
+print("\nSelecting t* on validation set...")
+noise_level_grid = [100, 250, 500, 750]
+val_aucs = {}
+for noise_level in noise_level_grid:
+    scores_val = score_ldm_recon(x_val_by_video, ldm_ae.encode, ldm_ae.decode,
+                                  scheduler_latent, denoiser_latent, device,
+                                  noise_level=noise_level)
+    auc_val = roc_auc_score(y_val_vids, scores_val)
+    val_aucs[noise_level] = auc_val
+    print(f"  val AUC @ t*={noise_level}: {auc_val:.4f}")
+
+best_t = max(val_aucs, key=val_aucs.get)
+print(f"Selected t* = {best_t} (val AUC = {val_aucs[best_t]:.4f})")
+
+# ---- Evaluate on TEST set with selected t* ----
+print("\nEvaluating on test set...")
 results = {}
+scores_test = score_ldm_recon(x_test_by_video, ldm_ae.encode, ldm_ae.decode,
+                               scheduler_latent, denoiser_latent, device,
+                               noise_level=best_t)
+auc_test = roc_auc_score(y_test_vids, scores_test)
+results[f"A1-recon-t{best_t}"] = auc_test
+print(f"  Latent diffusion (recon, t*={best_t}): test AUC = {auc_test:.4f}")
 
-for noise_level in [100, 250, 500, 750]:
-    scores = score_ldm_recon(x_test_by_video, ldm_ae.encode, ldm_ae.decode, scheduler_latent, denoiser_latent, device, noise_level=noise_level)
-    auc = roc_auc_score(y_test_vids, scores)
-    results[f"A1-recon-t{noise_level}"] = auc
-    print(f"  Latent diffusion model (recon, t={noise_level}): AUC = {auc:.4f}")
-
-# Score with denoising error
-scores_denoise = score_ldm_denoise_error(x_test_by_video, ldm_ae.encode, scheduler_latent, denoiser_latent, device)
+# Also report denoise-error score (no hyperparameter to tune)
+scores_denoise = score_ldm_denoise_error(x_test_by_video, ldm_ae.encode,
+                                          scheduler_latent, denoiser_latent, device)
 auc_denoise = roc_auc_score(y_test_vids, scores_denoise)
 results["A1-denoise-error"] = auc_denoise
-print(f"  Latent diffusion model (denoise error):   AUC = {auc_denoise:.4f}")
+print(f"  Latent diffusion (denoise error):      test AUC = {auc_denoise:.4f}")
 
 # Plot AUC results
 labels = list(results.keys())
@@ -212,3 +244,48 @@ plt.savefig("roc_auc_ldm.png", dpi=150)
 plt.show()
 print("Saved AUC bar chart to roc_auc_ldm.png")
 
+#  Recon-error ROC (uses scores_test from the selected t*)
+fpr_recon, tpr_recon, _ = roc_curve(y_test_vids, scores_test)
+auc_recon = roc_auc_score(y_test_vids, scores_test)
+
+plt.figure(figsize=(7, 5))
+plt.plot(fpr_recon, tpr_recon, label=f"Latent Diffusion — Recon Error (AUC = {auc_recon:.4f})")
+plt.plot([0, 1], [0, 1], 'k--', label="Random")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title(f"ROC Curve — LDM Reconstruction Error (t* = {best_t}) on TAD")
+plt.legend()
+plt.tight_layout()
+plt.savefig("roc_curve_ldm_recon.png", dpi=150)
+plt.show()
+print("Saved ROC curve to roc_curve_ldm_recon.png")
+
+# Denoise-error ROC (uses scores_denoise) 
+fpr_denoise, tpr_denoise, _ = roc_curve(y_test_vids, scores_denoise)
+
+plt.figure(figsize=(7, 5))
+plt.plot(fpr_denoise, tpr_denoise, color="darkorange",
+         label=f"Latent Diffusion — Denoise Error (AUC = {auc_denoise:.4f})")
+plt.plot([0, 1], [0, 1], 'k--', label="Random")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve — LDM Denoising Error on TAD")
+plt.legend()
+plt.tight_layout()
+plt.savefig("roc_curve_ldm_denoise.png", dpi=150)
+plt.show()
+print("Saved ROC curve to roc_curve_ldm_denoise.png")
+
+# Combined ROC plot
+plt.figure(figsize=(7, 5))
+plt.plot(fpr_recon,   tpr_recon,   label=f"Recon Error (AUC = {auc_recon:.4f})")
+plt.plot(fpr_denoise, tpr_denoise, label=f"Denoise Error (AUC = {auc_denoise:.4f})")
+plt.plot([0, 1], [0, 1], 'k--', label="Random")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curves — LDM Scoring Methods on TAD")
+plt.legend()
+plt.tight_layout()
+plt.savefig("roc_curve_ldm_combined.png", dpi=150)
+plt.show()
+print("Saved combined ROC curve to roc_curve_ldm_combined.png")
