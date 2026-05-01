@@ -78,9 +78,7 @@ sigma2_values = np.logspace(-3,1,10)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-
-
-n_epochs=100
+n_epochs=500
 models, all_auc, all_beta = [], [], []
 for sigma2 in sigma2_values:
     # Train
@@ -107,18 +105,13 @@ for sigma2 in sigma2_values:
         D = x.shape[1]
         with torch.no_grad():
             x_recon, mu, log_var = model(x)
-        # recon_errors = (torch.sum((x - x_recon) ** 2, dim=1) / (2 * sigma2)).cpu().numpy()  # shape (25,)
-        # kl_per_seg   = (-0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1)).cpu().numpy()
 
-        # val_recon.append(recon_errors)
-        # val_kl.append(kl_per_seg)
         recon_log_likelihood = -torch.sum((x - x_recon) ** 2, dim=1) / (2 * sigma2) \
                        - (D / 2) * np.log(2 * np.pi * sigma2)  # shape (32,)
 
         kl_per_seg = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1)
 
         ELBO = recon_log_likelihood - kl_per_seg  # higher = more normal
-        #val_elbo.append(-ELBO.mean().cpu().numpy())
 
         mean_score = (-ELBO).mean().item()
         max_score  = (-ELBO).max().item()
@@ -127,13 +120,10 @@ for sigma2 in sigma2_values:
         val_max.append(max_score)
         val_k.append(topk_score)
 
-        k = 3
+        k = 5
         video_score = np.mean(np.sort(-ELBO.cpu().numpy())[-k:])
         val_elbo.append(video_score)
 
-    
-    
-    #scores = [r.mean() +  k.mean() for r, k in zip(val_recon, val_kl)]
     auc_mean = roc_auc_score(y_val_vids, val_mean)
     auc_max = roc_auc_score(y_val_vids, val_max)
     auc_k = roc_auc_score(y_val_vids, val_k)
@@ -157,11 +147,7 @@ for vid_feats in X_test_norm:
     D = x.shape[1]
     with torch.no_grad():
         x_recon, mu, log_var = best_model(x)
-    # recon_errors = torch.sum((x - x_recon) ** 2, dim=1) / (2 * best_sigma2)  # shape (25,)
-    # kl_per_seg   = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1)
-    
-    # ELBO = recon_errors +  kl_per_seg
-    # video_recon_errors.append(-ELBO.mean().cpu().numpy())  
+
     recon_log_likelihood = -torch.sum((x - x_recon) ** 2, dim=1) / (2 * best_sigma2) \
                        - (D / 2) * np.log(2 * np.pi * best_sigma2)  # shape (25,)
 
@@ -215,3 +201,5 @@ plt.tight_layout()
 plt.savefig("roc_curve_32frames.png")
 plt.show()
 
+np.save("vae_test_scores.npy", video_recon_errors) # save scores for calibration
+np.save("test_labels.npy", y_test_vids)
