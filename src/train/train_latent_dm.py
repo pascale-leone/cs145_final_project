@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 import torch
 import pickle
@@ -7,7 +8,10 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 
-from src.models.ddpm import LinearNoiseScheduler, NoisePredictionDenoiser, LDMAutoencoder
+from src.models.ddpm import (
+    LinearNoiseScheduler, CosineNoiseScheduler,
+    NoisePredictionDenoiser, LDMAutoencoder,
+)
 
 # random seed for reproducability
 torch.manual_seed(42)
@@ -46,14 +50,24 @@ x_test_vids  = np.stack([features[k] for k in test_keys])
 y_val_vids   = np.array([0 if k in normal_val_keys  else 1 for k in val_keys])
 y_test_vids  = np.array([0 if k in normal_test_keys else 1 for k in test_keys])
 
-# normalize features using TRAIN stats only
+# normalize features using TRAIN stats only, per-modality z-score
 x_train_flat_raw = x_train_vids.reshape(-1, x_train_vids.shape[-1])
-feat_mean = np.mean(x_train_flat_raw, axis=0)
-feat_std  = np.std(x_train_flat_raw, axis=0) + 1e-8
+x_val_flat_raw   = x_val_vids.reshape(-1, x_val_vids.shape[-1])
+x_test_flat_raw  = x_test_vids.reshape(-1, x_test_vids.shape[-1])
 
-x_train_flat = (x_train_flat_raw - feat_mean) / feat_std
-x_val_flat   = (x_val_vids.reshape(-1, x_val_vids.shape[-1])  - feat_mean) / feat_std
-x_test_flat  = (x_test_vids.reshape(-1, x_test_vids.shape[-1]) - feat_mean) / feat_std
+RGB_DIM = 1024  # first 1024 dims are RGB, next 1024 are flow
+mu_rgb,  sd_rgb  = x_train_flat_raw[:, :RGB_DIM].mean(0), x_train_flat_raw[:, :RGB_DIM].std(0) + 1e-8
+mu_flow, sd_flow = x_train_flat_raw[:, RGB_DIM:].mean(0), x_train_flat_raw[:, RGB_DIM:].std(0) + 1e-8
+
+def per_modality_zscore(x_flat):
+    out = np.empty_like(x_flat)
+    out[:, :RGB_DIM] = (x_flat[:, :RGB_DIM] - mu_rgb)  / sd_rgb
+    out[:, RGB_DIM:] = (x_flat[:, RGB_DIM:] - mu_flow) / sd_flow
+    return out
+
+x_train_flat = per_modality_zscore(x_train_flat_raw)
+x_val_flat   = per_modality_zscore(x_val_flat_raw)
+x_test_flat  = per_modality_zscore(x_test_flat_raw)
 
 x_val_by_video  = x_val_flat.reshape(x_val_vids.shape)
 x_test_by_video = x_test_flat.reshape(x_test_vids.shape)
@@ -68,15 +82,15 @@ print("Step 1: Training LDM Autoencoder (beta=0.01)")
 print("="*70)
 
 ldm_ae = LDMAutoencoder(
-    n_dims_data=2048, n_dims_code=32,
-    hidden_layer_sizes=[512, 256], beta=0.01
+    n_dims_data=2048, n_dims_code=128,
+    hidden_layer_sizes=[1024, 512], beta=0.01
 ).to(device)
 
 ae_optimizer = torch.optim.Adam(ldm_ae.parameters(), lr=1e-3)
 ae_dataset = TensorDataset(torch.FloatTensor(x_train_flat), torch.zeros(len(x_train_flat)))
 ae_loader = DataLoader(ae_dataset, batch_size=64, shuffle=True)
 
-n_epochs_ae = 100
+n_epochs_ae = 200
 for epoch in range(1, n_epochs_ae + 1):
     ldm_ae.train()
     total_loss, total_recon, total_kl = 0.0, 0.0, 0.0
@@ -114,36 +128,42 @@ print(f"Latent mean: {train_latents.mean():.4f}, std: {train_latents.std():.4f}"
 
 # train diffusion model on latents
 T = 1000
-scheduler_latent = LinearNoiseScheduler(T = T, device=device)
-denoiser_latent = NoisePredictionDenoiser(latent_dim= train_latents.shape[1], time_embed_dim=32, hidden_dim=256).to(device)
+scheduler_latent = CosineNoiseScheduler(T=T, device=device)  # cosine schedule preserves more signal at high t
+denoiser_latent = NoisePredictionDenoiser(latent_dim= train_latents.shape[1], time_embed_dim=64, hidden_dim=512, n_hidden=5).to(device)
 optimizer = torch.optim.Adam(denoiser_latent.parameters(), lr=1e-3)
+
+# EMA copy of the denoiser — used for scoring at test time
+ema_denoiser = copy.deepcopy(denoiser_latent)
+for p in ema_denoiser.parameters():
+    p.requires_grad_(False)
+ema_decay = 0.999
 
 train_dataset = TensorDataset(train_latents, torch.zeros(len(train_latents)))
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
-n_epochs_latent = 500
+n_epochs_latent = 1000
 
-print(f"Training latent diffusion model for {n_epochs_latent} epochs...")
+print(f"Training latent diffusion model for {n_epochs_latent} epochs (cosine schedule + EMA)...")
 
 for epoch in range(1, n_epochs_latent + 1):
     # train for one epoch
     denoiser_latent.train()
     total_loss = 0.0
     n_batches = 0
-    
+
     for batch_latents, _ in train_loader:
         batch_latents = batch_latents.to(device)
         batch_size = batch_latents.shape[0]
-        
+
         # sample random timesteps for each sample in the batch
         t = torch.randint(0, T, (batch_size,), device=device)
-        
+
         # add noise to the latents according to the scheduler
         noisy_latents, noise = scheduler_latent.add_noise(batch_latents, t)
-        
+
         # predict the noise using the denoiser
         noise_pred = denoiser_latent(noisy_latents, t)
-        
+
         # compute loss (MSE between predicted noise and true noise)
         loss = F.mse_loss(noise_pred, noise)
         optimizer.zero_grad()
@@ -151,6 +171,12 @@ for epoch in range(1, n_epochs_latent + 1):
         optimizer.step()
         total_loss += loss.item()
         n_batches += 1
+
+        # EMA update of the shadow denoiser
+        with torch.no_grad():
+            for p, ep in zip(denoiser_latent.parameters(), ema_denoiser.parameters()):
+                ep.mul_(ema_decay).add_(p.data, alpha=1 - ema_decay)
+
     if epoch % 50 == 0 or epoch == 1:
         print(f"Epoch {epoch}/{n_epochs_latent}, Loss: {total_loss / n_batches:.4f}")
 torch.save(denoiser_latent.state_dict(), "checkpoints/latent_diffusion_model.pt")
@@ -346,7 +372,7 @@ n_timestep_grid = [100, 200, 300, 400, 500, 600, 700, 800, 900, 999]
 val_aucs = {}
 for t in n_timestep_grid:
     scores_val = score_ldm_vlb(x_val_by_video, ldm_ae.encode,
-                                scheduler_latent, denoiser_latent, device,
+                                scheduler_latent, ema_denoiser, device,
                                 n_timesteps=t)
     auc_val = roc_auc_score(y_val_vids, scores_val)
     val_aucs[t] = auc_val
@@ -355,15 +381,15 @@ for t in n_timestep_grid:
 best_t = max(val_aucs, key=val_aucs.get)
 print(f"Selected n_timesteps = {best_t} (val AUC = {val_aucs[best_t]:.4f})")
 
-# report VLB error score
+# report VLB error score (using EMA-averaged denoiser weights)
 scores_vlb = score_ldm_vlb(x_test_by_video, ldm_ae.encode,
-                                          scheduler_latent, denoiser_latent, device, n_timesteps=best_t)
+                                          scheduler_latent, ema_denoiser, device, n_timesteps=best_t)
 auc_vlb = roc_auc_score(y_test_vids, scores_vlb)
 
 print(f"  Latent diffusion (vlb error):      test AUC = {auc_vlb:.4f}")
 
 
-# VLB-error ROC 
+# VLB-error ROC
 fpr_vlb, tpr_vlb, _ = roc_curve(y_test_vids, scores_vlb)
 
 plt.figure(figsize=(7, 5))

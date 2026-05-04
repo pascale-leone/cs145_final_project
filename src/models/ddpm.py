@@ -85,7 +85,34 @@ class LinearNoiseScheduler:
         self.alphas = self.alphas.to(device)
         self.alpha_bars = self.alpha_bars.to(device)
         return self
-    
+
+
+class CosineNoiseScheduler(LinearNoiseScheduler):
+    """Cosine noise schedule (Nichol & Dhariwal 2021).
+
+    Destroys signal more slowly than the linear schedule at high t,
+    which preserves anomaly-detection signal at the noise levels where
+    the VLB / denoising-error scoring tends to be strongest.
+    Inherits add_noise / denoise / to from LinearNoiseScheduler.
+    """
+
+    def __init__(self, T=1000, s=0.008, device='cpu'):
+        # Avoid super().__init__ since the linear schedule sets up its own betas
+        self.T = T
+        self.device = device
+
+        steps = T + 1
+        t = torch.linspace(0, T, steps, device=device) / T
+        f = torch.cos((t + s) / (1 + s) * math.pi / 2) ** 2
+        alpha_bars = f / f[0]
+        self.alpha_bars = alpha_bars[1:]  # length T
+
+        # Recover beta_t from alpha_bars: beta_t = 1 - alpha_bar_t / alpha_bar_{t-1}
+        prev = torch.cat([torch.tensor([1.0], device=device), self.alpha_bars[:-1]])
+        self.betas = (1.0 - self.alpha_bars / prev).clamp(min=1e-8, max=0.999)
+        self.alphas = 1.0 - self.betas
+
+
 class LDMAutoencoder(nn.Module):
     """Autoencoder with tunable KL weight (beta) for latent diffusion.
 
