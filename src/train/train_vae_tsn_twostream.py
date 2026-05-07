@@ -76,16 +76,16 @@ sigma2_values = np.logspace(-3,1,10)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-n_epochs=100
+n_epochs=200
 models, all_auc, all_beta = [], [], []
 for sigma2 in sigma2_values:
     # Train
     torch.manual_seed(42)
     np.random.seed(42)
     model = VariationalAutoencoder(
-        n_dims_code=32,
+        n_dims_code=128,
         n_dims_data=2048,
-        hidden_layer_sizes=[512, 256]
+        hidden_layer_sizes=[1024, 512]
     ).to(device)
 
 
@@ -191,8 +191,11 @@ plt.plot(fpr, tpr, label=f"VAE baseline (AUC = {auc:.4f})")
 plt.plot([0, 1], [0, 1], 'k--', label="Random")
 plt.xlabel("False Positive Rate")
 plt.ylabel("True Positive Rate")
-plt.title("ROC Curve — VAE Anomaly Detection on TAD (two stream feature extraction)")
+plt.title("ROC Curve — VAE ELBO Error on TAD")
 plt.legend()
 plt.tight_layout()
 plt.savefig("results/figures/roc_curve_twostream.png")
 plt.show()
+
+np.save("src/eval/vae_test_scores_2.npy", video_recon_errors) # save scores for calibration
+np.save("src/eval/test_labels_2.npy", y_test_vids)
