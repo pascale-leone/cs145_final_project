@@ -405,3 +405,6 @@ plt.savefig("results/figures/roc_curve_ldm_vlb.png", dpi=150)
 plt.show()
 print("Saved ROC curve to results/figures/roc_curve_ldm_vlb.png")
 
+np.save("src/eval/ldm_test_scores_2.npy", scores_vlb) # save scores for calibration
+np.save("src/eval/test_labels_2.npy", y_test_vids)
+np.save("src/eval/test_keys.npy", test_keys)

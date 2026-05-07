@@ -2,14 +2,14 @@ import numpy as np
 import pickle
 import torch
 from torch.utils.data import DataLoader, TensorDataset
-from src.models.starter_vae import VariationalAutoencoder
+from starter_vae import VariationalAutoencoder
 from sklearn.metrics import roc_auc_score, roc_curve, f1_score, classification_report
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 
 # ── 1. LOAD FEATURES ─────────────────────────────────────────────────────────
 
-with open("data/features/tad_rgb_features_32.pkl", "rb") as f:
+with open("tad_rgb_features_32.pkl", "rb") as f:
     features = pickle.load(f)
 
 video_keys = list(features.keys())
@@ -198,8 +198,9 @@ plt.ylabel("True Positive Rate")
 plt.title("ROC Curve — VAE Anomaly Detection on TAD (32 Frames)")
 plt.legend()
 plt.tight_layout()
-plt.savefig("results/figures/roc_curve_32frames.png")
+plt.savefig("roc_curve_32frames.png")
 plt.show()
 
-np.save("results/scores/vae_test_scores.npy", video_recon_errors) # save scores for calibration
-np.save("results/scores/test_labels.npy", y_test_vids)
+np.save("vae_test_scores.npy", video_recon_errors) # save scores for calibration
+np.save("test_labels.npy", y_test_vids)
+np.save("test_keys.npy", test_keys)

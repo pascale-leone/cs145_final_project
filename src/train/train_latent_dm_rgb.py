@@ -122,7 +122,7 @@ optimizer = torch.optim.Adam(denoiser_latent.parameters(), lr=1e-3)
 train_dataset = TensorDataset(train_latents, torch.zeros(len(train_latents)))
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
-n_epochs_latent = 500
+n_epochs_latent = 1000
 
 print(f"Training latent diffusion model for {n_epochs_latent} epochs...")
 
